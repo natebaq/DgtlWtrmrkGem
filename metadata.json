@@ -1,0 +1,6 @@
+{
+  "name": "Digital Watermarker",
+  "description": "Apply and verify custom visual and steganographic digital watermarks on images and videos in batches.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}

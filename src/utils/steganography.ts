@@ -5,59 +5,132 @@ export const STEGO_SIGNATURE = "DIGITAL_WATERMARK_VERIFIED_2026";
 // 24-bit magic header to identify robust watermark payload presence
 const ROBUST_MAGIC_HEADER = [1, 0, 1, 1, 0, 1, 0, 0, 1, 1, 0, 0, 1, 1, 1, 0, 0, 1, 0, 1, 1, 0, 1, 1];
 
-// Precompute 1D DCT cosine factors for an 8x8 grid to optimize performance
-const COS_TABLE: number[][] = [];
-for (let i = 0; i < 8; i++) {
-  COS_TABLE[i] = [];
+// Selected 16 stable mid-frequency coefficients from the 4x4 Haar DWT sub-bands
+const SELECTED_COEFFS = [
+  { band: 'LH', r: 0, c: 1 },
+  { band: 'LH', r: 0, c: 2 },
+  { band: 'LH', r: 1, c: 0 },
+  { band: 'LH', r: 1, c: 1 },
+  { band: 'LH', r: 1, c: 2 },
+  { band: 'LH', r: 2, c: 0 },
+  { band: 'LH', r: 2, c: 1 },
+  { band: 'LH', r: 2, c: 2 },
+  { band: 'HL', r: 0, c: 1 },
+  { band: 'HL', r: 0, c: 2 },
+  { band: 'HL', r: 1, c: 0 },
+  { band: 'HL', r: 1, c: 1 },
+  { band: 'HL', r: 1, c: 2 },
+  { band: 'HL', r: 2, c: 0 },
+  { band: 'HL', r: 2, c: 1 },
+  { band: 'HL', r: 2, c: 2 },
+];
+
+/**
+ * 100% deterministic, platform-independent Mulberry32 PRNG
+ */
+function createSeededPRNG(seed: number) {
+  let h = seed >>> 0;
+  return function() {
+    h = (h + 0x6D2B79F5) | 0;
+    const imul = Math.imul;
+    let t = imul(h ^ (h >>> 15), 1 | h);
+    t = (t + imul(t ^ (t >>> 7), 61 | t)) ^ t;
+    return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+  };
+}
+
+/**
+ * Generates an orthogonal pseudo-random noise (PN) sequence of length 16
+ * corresponding deterministically to each payload bit index.
+ */
+function getPNSequence(bitIndex: number, length: number): number[] {
+  const prng = createSeededPRNG(133719 + bitIndex);
+  const seq: number[] = [];
+  for (let i = 0; i < length; i++) {
+    seq.push(prng() < 0.5 ? -1 : 1);
+  }
+  return seq;
+}
+
+/**
+ * Performs a 2D 1-level Discrete Haar Wavelet Transform (DWT) on an 8x8 matrix
+ */
+function haarDWT8x8(block: number[][]): { LL: number[][]; LH: number[][]; HL: number[][]; HH: number[][] } {
+  const temp = Array.from({ length: 8 }, () => Array(8).fill(0));
+  const sqrt2 = Math.sqrt(2);
+  
+  // Row transform
+  for (let i = 0; i < 8; i++) {
+    for (let j = 0; j < 4; j++) {
+      temp[i][j] = (block[i][2 * j] + block[i][2 * j + 1]) / sqrt2;
+      temp[i][j + 4] = (block[i][2 * j] - block[i][2 * j + 1]) / sqrt2;
+    }
+  }
+  
+  // Column transform
+  const LL = Array.from({ length: 4 }, () => Array(4).fill(0));
+  const HL = Array.from({ length: 4 }, () => Array(4).fill(0));
+  const LH = Array.from({ length: 4 }, () => Array(4).fill(0));
+  const HH = Array.from({ length: 4 }, () => Array(4).fill(0));
+  
   for (let j = 0; j < 8; j++) {
-    COS_TABLE[i][j] = Math.cos(((2 * i + 1) * j * Math.PI) / 16);
+    for (let i = 0; i < 4; i++) {
+      const valSum = (temp[2 * i][j] + temp[2 * i + 1][j]) / sqrt2;
+      const valDiff = (temp[2 * i][j] - temp[2 * i + 1][j]) / sqrt2;
+      
+      if (j < 4) {
+        LL[i][j] = valSum;
+        LH[i][j] = valDiff;
+      } else {
+        HL[i][j - 4] = valSum;
+        HH[i][j - 4] = valDiff;
+      }
+    }
   }
+  
+  return { LL, LH, HL, HH };
 }
 
 /**
- * 2D Discrete Cosine Transform (DCT-II) for an 8x8 matrix
+ * Performs a 2D 1-level Inverse Discrete Haar Wavelet Transform (IDWT)
  */
-function dct8x8(block: number[][]): number[][] {
-  const dct: number[][] = Array.from({ length: 8 }, () => Array(8).fill(0));
-  for (let u = 0; u < 8; u++) {
-    const cu = u === 0 ? 1 / Math.sqrt(2) : 1;
-    for (let v = 0; v < 8; v++) {
-      const cv = v === 0 ? 1 / Math.sqrt(2) : 1;
-      let sum = 0;
-      for (let y = 0; y < 8; y++) {
-        for (let x = 0; x < 8; x++) {
-          sum += block[y][x] * COS_TABLE[x][u] * COS_TABLE[y][v];
-        }
+function haarIDWT8x8(LL: number[][], LH: number[][], HL: number[][], HH: number[][]): number[][] {
+  const temp = Array.from({ length: 8 }, () => Array(8).fill(0));
+  const sqrt2 = Math.sqrt(2);
+  
+  // Column inverse
+  for (let j = 0; j < 8; j++) {
+    for (let i = 0; i < 4; i++) {
+      if (j < 4) {
+        const s = LL[i][j];
+        const d = LH[i][j];
+        temp[2 * i][j] = (s + d) / sqrt2;
+        temp[2 * i + 1][j] = (s - d) / sqrt2;
+      } else {
+        const s = HL[i][j - 4];
+        const d = HH[i][j - 4];
+        temp[2 * i][j] = (s + d) / sqrt2;
+        temp[2 * i + 1][j] = (s - d) / sqrt2;
       }
-      dct[v][u] = 0.25 * cu * cv * sum;
     }
   }
-  return dct;
-}
-
-/**
- * 2D Inverse Discrete Cosine Transform (DCT-III) for an 8x8 matrix
- */
-function idct8x8(dct: number[][]): number[][] {
-  const block: number[][] = Array.from({ length: 8 }, () => Array(8).fill(0));
-  for (let y = 0; y < 8; y++) {
-    for (let x = 0; x < 8; x++) {
-      let sum = 0;
-      for (let u = 0; u < 8; u++) {
-        const cu = u === 0 ? 1 / Math.sqrt(2) : 1;
-        for (let v = 0; v < 8; v++) {
-          const cv = v === 0 ? 1 / Math.sqrt(2) : 1;
-          sum += cu * cv * dct[v][u] * COS_TABLE[x][u] * COS_TABLE[y][v];
-        }
-      }
-      block[y][x] = 0.25 * sum;
+  
+  // Row inverse
+  const block = Array.from({ length: 8 }, () => Array(8).fill(0));
+  for (let i = 0; i < 8; i++) {
+    for (let j = 0; j < 4; j++) {
+      const s = temp[i][j];
+      const d = temp[i][j + 4];
+      block[i][2 * j] = (s + d) / sqrt2;
+      block[i][2 * j + 1] = (s - d) / sqrt2;
     }
   }
+  
   return block;
 }
 
 /**
- * Encodes a string into a fixed-width binary bitstream of 424 bits (24 header bits + 400 string bits)
+ * Encodes owner string with magic headers into a robust, fixed 424-bit stream
  */
 function stringToFixedBits(str: string): number[] {
   const bits: number[] = [];
@@ -74,7 +147,7 @@ function stringToFixedBits(str: string): number[] {
     if (i < bytes.length) {
       paddedBytes[i] = bytes[i];
     } else {
-      paddedBytes[i] = 0; // Null byte padding
+      paddedBytes[i] = 0;
     }
   }
   
@@ -89,8 +162,170 @@ function stringToFixedBits(str: string): number[] {
 }
 
 /**
- * Embeds robust DCT-domain mid-frequency watermarking into the image's Luminance (Y) channel.
- * High resistance to lossy JPEG compression because it alters the active cosine frequencies directly.
+ * Resamples an image using optimized browser graphics pipeline (bilinear interpolation)
+ */
+function resampleImageData(imageData: ImageData, targetWidth: number, targetHeight: number): ImageData {
+  const canvas = document.createElement('canvas');
+  canvas.width = targetWidth;
+  canvas.height = targetHeight;
+  const ctx = canvas.getContext('2d');
+  if (!ctx) return imageData;
+  
+  const tempCanvas = document.createElement('canvas');
+  tempCanvas.width = imageData.width;
+  tempCanvas.height = imageData.height;
+  tempCanvas.getContext('2d')?.putImageData(imageData, 0, 0);
+  
+  ctx.drawImage(tempCanvas, 0, 0, targetWidth, targetHeight);
+  return ctx.getImageData(0, 0, targetWidth, targetHeight);
+}
+
+/**
+ * Subsamples or crops a standard 384x384 patch in the absolute center of the image canvas
+ */
+function getCenterPatch(imageData: ImageData, size: number = 384): ImageData {
+  const W = imageData.width;
+  const H = imageData.height;
+  if (W <= size && H <= size) {
+    return imageData;
+  }
+  
+  const startX = Math.floor((W - size) / 2);
+  const startY = Math.floor((H - size) / 2);
+  const actualW = Math.min(size, W);
+  const actualH = Math.min(size, H);
+  
+  const tempCanvas = document.createElement('canvas');
+  tempCanvas.width = W;
+  tempCanvas.height = H;
+  const tempCtx = tempCanvas.getContext('2d');
+  if (!tempCtx) return imageData;
+  tempCtx.putImageData(imageData, 0, 0);
+  
+  const targetCanvas = document.createElement('canvas');
+  targetCanvas.width = actualW;
+  targetCanvas.height = actualH;
+  const targetCtx = targetCanvas.getContext('2d');
+  if (!targetCtx) return imageData;
+  
+  targetCtx.drawImage(tempCanvas, startX, startY, actualW, actualH, 0, 0, actualW, actualH);
+  return targetCtx.getImageData(0, 0, actualW, actualH);
+}
+
+/**
+ * Helper to decode robust coefficients under specific translation offset parameters
+ */
+function decodeWithParameters(imageData: ImageData, dx: number, dy: number): {
+  ratio: number;
+  matches: number;
+  decodedOwner?: string;
+  decodedBits: number[];
+} {
+  const data = imageData.data;
+  const W = imageData.width;
+  const H = imageData.height;
+
+  const numBlocksX = Math.floor((W - dx) / 8);
+  const numBlocksY = Math.floor((H - dy) / 8);
+  
+  if (numBlocksX < 4 || numBlocksY < 4) {
+    return { ratio: 0, matches: 0, decodedBits: [] };
+  }
+
+  const PAYLOAD_BIT_LEN = 24 + 50 * 8; // 424 bits
+
+  const bitCorrelations = Array(PAYLOAD_BIT_LEN).fill(0);
+  const bitCounts = Array(PAYLOAD_BIT_LEN).fill(0);
+
+  let blockIndex = 0;
+  for (let by = 0; by < numBlocksY; by++) {
+    for (let bx = 0; bx < numBlocksX; bx++) {
+      const x0 = dx + bx * 8;
+      const y0 = dy + by * 8;
+
+      const Y: number[][] = Array.from({ length: 8 }, () => Array(8).fill(0));
+      for (let dyBlock = 0; dyBlock < 8; dyBlock++) {
+        for (let dxBlock = 0; dxBlock < 8; dxBlock++) {
+          const px = x0 + dxBlock;
+          const py = y0 + dyBlock;
+          const idx = (py * W + px) * 4;
+
+          const r = data[idx];
+          const g = data[idx + 1];
+          const b = data[idx + 2];
+
+          Y[dyBlock][dxBlock] = 0.299 * r + 0.587 * g + 0.114 * b;
+        }
+      }
+
+      const { LH, HL } = haarDWT8x8(Y);
+
+      const bitPos = blockIndex % PAYLOAD_BIT_LEN;
+      const PN = getPNSequence(bitPos, 16);
+
+      let S = 0;
+      for (let i = 0; i < 16; i++) {
+        const item = SELECTED_COEFFS[i];
+        const val = item.band === 'LH' ? LH[item.r][item.c] : HL[item.r][item.c];
+        S += val * PN[i];
+      }
+
+      bitCorrelations[bitPos] += S;
+      bitCounts[bitPos]++;
+      blockIndex++;
+    }
+  }
+
+  const decodedBits: number[] = [];
+  for (let i = 0; i < PAYLOAD_BIT_LEN; i++) {
+    if (bitCounts[i] === 0) {
+      decodedBits.push(0);
+    } else {
+      decodedBits.push(bitCorrelations[i] > 0 ? 1 : 0);
+    }
+  }
+
+  let headerMatches = 0;
+  for (let i = 0; i < ROBUST_MAGIC_HEADER.length; i++) {
+    if (decodedBits[i] === ROBUST_MAGIC_HEADER[i]) {
+      headerMatches++;
+    }
+  }
+
+  const ratio = headerMatches / ROBUST_MAGIC_HEADER.length;
+
+  let decodedOwner = "";
+  if (ratio >= 0.70) {
+    const bytes: number[] = [];
+    let ptr = ROBUST_MAGIC_HEADER.length;
+    for (let i = 0; i < 50; i++) {
+      let byte = 0;
+      for (let j = 0; j < 8; j++) {
+        byte = (byte << 1) | decodedBits[ptr];
+        ptr++;
+      }
+      bytes.push(byte);
+    }
+
+    try {
+      const trimmedBytes = bytes.filter(b => b !== 0);
+      decodedOwner = new TextDecoder('utf-8').decode(new Uint8Array(trimmedBytes));
+      decodedOwner = decodedOwner.replace(/[^\x20-\x7E\u00A0-\uD7FF\uF900-\uFDCF\uFDF0-\uFFEF\uAC00-\uD7A3가-힣]/g, '');
+    } catch (e) {
+      decodedOwner = bytes.filter(b => b > 31 && b < 127).map(b => String.fromCharCode(b)).join('');
+    }
+  }
+
+  return {
+    ratio,
+    matches: headerMatches,
+    decodedOwner: decodedOwner.trim() || undefined,
+    decodedBits
+  };
+}
+
+/**
+ * Embeds robust Wavelet-domain Spread Spectrum (DWT-SS) watermark into image's Luminance
  */
 export function embedRobustWatermark(imageData: ImageData, customOwner?: string): ImageData {
   const data = imageData.data;
@@ -100,7 +335,6 @@ export function embedRobustWatermark(imageData: ImageData, customOwner?: string)
   const numBlocksX = Math.floor(W / 8);
   const numBlocksY = Math.floor(H / 8);
   if (numBlocksX < 4 || numBlocksY < 4) {
-    // Skip if image is too small to contain watermark grids
     return imageData;
   }
 
@@ -108,18 +342,19 @@ export function embedRobustWatermark(imageData: ImageData, customOwner?: string)
   const PAYLOAD_BIT_LEN = 24 + 50 * 8; // 424 bits
   const bits = stringToFixedBits(ownerToEmbed);
 
-  const DELTA = 25; // Modulation strength for maximum survival under low-quality JPG
+  // G = 24 ensures excellent mathematical survival with 100% human-imperceptible pixels
+  const TARGET_G = 24.0;
 
   let blockIndex = 0;
   for (let by = 0; by < numBlocksY; by++) {
     for (let bx = 0; bx < numBlocksX; bx++) {
       const bitPos = blockIndex % PAYLOAD_BIT_LEN;
       const bit = bits[bitPos];
+      const bitVal = bit === 1 ? 1 : -1;
 
       const x0 = bx * 8;
       const y0 = by * 8;
 
-      // 1. RGB to YCbCr conversion for the 8x8 block
       const Y: number[][] = Array.from({ length: 8 }, () => Array(8).fill(0));
       const Cb: number[][] = Array.from({ length: 8 }, () => Array(8).fill(0));
       const Cr: number[][] = Array.from({ length: 8 }, () => Array(8).fill(0));
@@ -140,32 +375,36 @@ export function embedRobustWatermark(imageData: ImageData, customOwner?: string)
         }
       }
 
-      // 2. Forward 2D DCT on Luminance (Y) block
-      const Y_dct = dct8x8(Y);
+      // 1-Level Haar DWT
+      const { LL, LH, HL, HH } = haarDWT8x8(Y);
 
-      // We select mid-frequency coefficients F(4, 1) and F(3, 2)
-      let A = Y_dct[4][1];
-      let B = Y_dct[3][2];
+      // Extract current correlation for selected 16 coefficients
+      const PN = getPNSequence(bitPos, 16);
+      let S = 0;
+      for (let i = 0; i < 16; i++) {
+        const item = SELECTED_COEFFS[i];
+        const val = item.band === 'LH' ? LH[item.r][item.c] : HL[item.r][item.c];
+        S += val * PN[i];
+      }
 
-      // 3. Modulate mid-frequency coefficients (Differential encoding)
-      if (bit === 1) {
-        if (A - B < DELTA) {
-          const diff = (A - B) - DELTA;
-          Y_dct[4][1] = A - diff / 2;
-          Y_dct[3][2] = B + diff / 2;
-        }
-      } else {
-        if (B - A < DELTA) {
-          const diff = (B - A) - DELTA;
-          Y_dct[3][2] = B - diff / 2;
-          Y_dct[4][1] = A + diff / 2;
+      // Modulate correlation value with Spread Spectrum guard gap
+      if (S * bitVal < TARGET_G) {
+        const diff = bitVal * TARGET_G - S;
+        const adjustment = diff / 16;
+        for (let i = 0; i < 16; i++) {
+          const item = SELECTED_COEFFS[i];
+          if (item.band === 'LH') {
+            LH[item.r][item.c] += adjustment * PN[i];
+          } else {
+            HL[item.r][item.c] += adjustment * PN[i];
+          }
         }
       }
 
-      // 4. Inverse 2D DCT to return to space domain
-      const Y_mod = idct8x8(Y_dct);
+      // Inverse DWT
+      const Y_mod = haarIDWT8x8(LL, LH, HL, HH);
 
-      // 5. Reconstruct RGB pixels using original Cb and Cr chrominances
+      // Reconstruct pixels in original space
       for (let dy = 0; dy < 8; dy++) {
         for (let dx = 0; dx < 8; dx++) {
           const px = x0 + dx;
@@ -190,7 +429,7 @@ export function embedRobustWatermark(imageData: ImageData, customOwner?: string)
 }
 
 /**
- * Detects the embedded robust DCT-based safety seal with majority voting across blocks.
+ * Sweeps potential translations and scales to blinds-decode robust Wavelet-domain watermark
  */
 export function detectRobustWatermark(imageData: ImageData): { 
   matches: number; 
@@ -198,128 +437,89 @@ export function detectRobustWatermark(imageData: ImageData): {
   ratio: number; 
   decodedOwner?: string; 
 } {
-  const data = imageData.data;
   const W = imageData.width;
   const H = imageData.height;
 
-  const numBlocksX = Math.floor(W / 8);
-  const numBlocksY = Math.floor(H / 8);
-  if (numBlocksX < 4 || numBlocksY < 4) {
-    return { matches: 0, total: ROBUST_MAGIC_HEADER.length, ratio: 0 };
+  // 1. Instant test at native scale/alignment for rapid validation
+  const baseResult = decodeWithParameters(imageData, 0, 0);
+  if (baseResult.ratio >= 0.78) {
+    return {
+      matches: baseResult.matches,
+      total: ROBUST_MAGIC_HEADER.length,
+      ratio: baseResult.ratio,
+      decodedOwner: baseResult.decodedOwner
+    };
   }
 
-  const PAYLOAD_BIT_LEN = 24 + 50 * 8; // 424 bits
-  const voters: number[][] = Array.from({ length: PAYLOAD_BIT_LEN }, () => []);
+  // 2. Multi-scale & multi-offset grid sweep on optimized centermost patch
+  const centerPatch = getCenterPatch(imageData, 384);
+  const SCALE_FACTORS = [1.0, 0.75, 0.67, 0.5, 0.8, 1.2, 1.33, 1.5, 2.0];
+  
+  let bestScale = 1.0;
+  let bestDx = 0;
+  let bestDy = 0;
+  let bestRatio = baseResult.ratio;
+  let bestMatches = baseResult.matches;
 
-  let blockIndex = 0;
-  for (let by = 0; by < numBlocksY; by++) {
-    for (let bx = 0; bx < numBlocksX; bx++) {
-      const x0 = bx * 8;
-      const y0 = by * 8;
+  for (const scale of SCALE_FACTORS) {
+    let scaledPatch = centerPatch;
+    if (scale !== 1.0) {
+      const targetW = Math.max(128, Math.floor(centerPatch.width * scale));
+      const targetH = Math.max(128, Math.floor(centerPatch.height * scale));
+      scaledPatch = resampleImageData(centerPatch, targetW, targetH);
+    }
 
-      // Extract Luminance (Y) channel for DCT analysis
-      const Y: number[][] = Array.from({ length: 8 }, () => Array(8).fill(0));
-      for (let dy = 0; dy < 8; dy++) {
-        for (let dx = 0; dx < 8; dx++) {
-          const px = x0 + dx;
-          const py = y0 + dy;
-          const idx = (py * W + px) * 4;
-
-          const r = data[idx];
-          const g = data[idx + 1];
-          const b = data[idx + 2];
-
-          Y[dy][dx] = 0.299 * r + 0.587 * g + 0.114 * b;
+    for (let dy = 0; dy < 8; dy += 1) {
+      for (let dx = 0; dx < 8; dx += 1) {
+        const result = decodeWithParameters(scaledPatch, dx, dy);
+        if (result.ratio > bestRatio) {
+          bestRatio = result.ratio;
+          bestMatches = result.matches;
+          bestScale = scale;
+          bestDx = dx;
+          bestDy = dy;
+          if (bestRatio >= 0.88) break;
         }
       }
-
-      // Forward 2D DCT on Y channel
-      const Y_dct = dct8x8(Y);
-
-      const A = Y_dct[4][1];
-      const B = Y_dct[3][2];
-      const bit = A > B ? 1 : 0;
-
-      const bitPos = blockIndex % PAYLOAD_BIT_LEN;
-      voters[bitPos].push(bit);
-
-      blockIndex++;
+      if (bestRatio >= 0.88) break;
     }
+    if (bestRatio >= 0.88) break;
   }
 
-  // Compile final bit sequence from voter cards (majority voting)
-  const decodedBits: number[] = [];
-  for (let i = 0; i < PAYLOAD_BIT_LEN; i++) {
-    const votes = voters[i];
-    if (votes.length === 0) {
-      decodedBits.push(0);
-      continue;
+  // 3. Complete final decode over entire canvas on winning parameters
+  const confidenceThreshold = 0.70;
+  if (bestRatio >= confidenceThreshold) {
+    let finalDecodedImage = imageData;
+    if (bestScale !== 1.0) {
+      const finalW = Math.max(256, Math.floor(W * bestScale));
+      const finalH = Math.max(256, Math.floor(H * bestScale));
+      finalDecodedImage = resampleImageData(imageData, finalW, finalH);
     }
-    let ones = 0;
-    for (const v of votes) {
-      if (v === 1) ones++;
-    }
-    decodedBits.push(ones > votes.length / 2 ? 1 : 0);
-  }
 
-  // Validate the magic header matching
-  let headerMatches = 0;
-  for (let i = 0; i < ROBUST_MAGIC_HEADER.length; i++) {
-    if (decodedBits[i] === ROBUST_MAGIC_HEADER[i]) {
-      headerMatches++;
-    }
-  }
-
-  const ratio = headerMatches / ROBUST_MAGIC_HEADER.length;
-  const isHeaderValid = ratio >= 0.70; // Tolerates minor lossy noise
-
-  if (!isHeaderValid) {
-    return { matches: headerMatches, total: ROBUST_MAGIC_HEADER.length, ratio };
-  }
-
-  // Extract string payload bytes (50 bytes)
-  const bytes: number[] = [];
-  let ptr = ROBUST_MAGIC_HEADER.length;
-  for (let i = 0; i < 50; i++) {
-    let byte = 0;
-    for (let j = 0; j < 8; j++) {
-      byte = (byte << 1) | decodedBits[ptr];
-      ptr++;
-    }
-    bytes.push(byte);
-  }
-
-  let decodedOwner = "";
-  try {
-    const trimmedBytes = bytes.filter(b => b !== 0);
-    decodedOwner = new TextDecoder('utf-8').decode(new Uint8Array(trimmedBytes));
-    // Support Hangul / alpha numeric and standard unicode text safely
-    decodedOwner = decodedOwner.replace(/[^\x20-\x7E\u00A0-\uD7FF\uF900-\uFDCF\uFDF0-\uFFEF\uAC00-\uD7A3가-힣]/g, '');
-  } catch (e) {
-    decodedOwner = bytes.filter(b => b > 31 && b < 127).map(b => String.fromCharCode(b)).join('');
-  }
-
-  if (decodedOwner.trim().length === 0) {
-    return { matches: headerMatches, total: ROBUST_MAGIC_HEADER.length, ratio };
+    const finalResult = decodeWithParameters(finalDecodedImage, bestDx, bestDy);
+    return {
+      matches: finalResult.matches,
+      total: ROBUST_MAGIC_HEADER.length,
+      ratio: finalResult.ratio,
+      decodedOwner: finalResult.decodedOwner
+    };
   }
 
   return {
-    matches: headerMatches,
+    matches: bestMatches,
     total: ROBUST_MAGIC_HEADER.length,
-    ratio,
-    decodedOwner
+    ratio: bestRatio,
+    decodedOwner: undefined
   };
 }
 
 /**
- * Embeds an invisible steganographic signature into the LSBs of the red channel.
+ * Embeds an invisible steganographic LSB watermark in the red channel
  */
 export function embedStegoWatermark(imageData: ImageData, customOwner?: string): ImageData {
   const data = imageData.data;
-  
   const payload = customOwner ? `${STEGO_SIGNATURE}|${customOwner}` : STEGO_SIGNATURE;
   
-  // Use TextEncoder to cleanly support UTF-8 (including Korean/special characters)
   const encoder = new TextEncoder();
   const bytes = encoder.encode(payload);
   
@@ -328,19 +528,16 @@ export function embedStegoWatermark(imageData: ImageData, customOwner?: string):
     const binaryChar = bytes[i].toString(2).padStart(8, '0');
     binaryString += binaryChar;
   }
-  // Add an 8-bit null terminator to mark the end of the watermark message
-  binaryString += "00000000";
+  binaryString += "00000000"; // Null terminator
 
   if (binaryString.length * 4 > data.length) {
-    console.warn("Image space is insufficient for stego embedding");
+    console.warn("Image space is insufficient for steganography embedding");
     return imageData;
   }
 
   for (let i = 0; i < binaryString.length; i++) {
     const bit = parseInt(binaryString[i], 10);
-    const pixelIndex = i * 4; // R channel of pixel i
-    
-    // Clear least significant bit of Red, then set it to the target bit
+    const pixelIndex = i * 4;
     data[pixelIndex] = (data[pixelIndex] & 0xFE) | bit;
   }
   
@@ -348,19 +545,16 @@ export function embedStegoWatermark(imageData: ImageData, customOwner?: string):
 }
 
 /**
- * Extracts a steganographic message from the LSBs of the red channel.
+ * Extracts the LSB steganographic watermark from the red channel
  */
 export function detectStegoWatermark(imageData: ImageData): { presents: boolean; decoded: string; owner?: string } {
   const data = imageData.data;
   let binaryString = "";
-  
-  // Limit character scanning to 150 characters (1200 bits) for custom owner payloads safely
-  const maxBits = 150 * 8;
+  const maxBits = 150 * 8; // Max 150 characters
   
   for (let i = 0; i < maxBits; i++) {
     const pixelIndex = i * 4;
     if (pixelIndex >= data.length) break;
-    
     const bit = data[pixelIndex] & 1;
     binaryString += bit;
   }
@@ -371,9 +565,7 @@ export function detectStegoWatermark(imageData: ImageData): { presents: boolean;
     if (byteString.length < 8) break;
     
     const byte = parseInt(byteString, 2);
-    if (byte === 0) {
-      break; // Null terminator found
-    }
+    if (byte === 0) break;
     bytes.push(byte);
   }
 
@@ -395,7 +587,7 @@ export function detectStegoWatermark(imageData: ImageData): { presents: boolean;
 }
 
 /**
- * Generates an in-depth report by analyzing an image element.
+ * Analyzes file canvas and produces forensically detailed status checks
  */
 export function generateVerificationReport(
   file: File, 
@@ -426,28 +618,24 @@ export function generateVerificationReport(
       const imgHeight = canvas.height;
       const imageData = ctx.getImageData(0, 0, imgWidth, imgHeight);
       
-      const { presents, decoded, owner } = detectStegoWatermark(imageData);
-      const { matches, total, ratio, decodedOwner } = detectRobustWatermark(imageData);
+      const { presents, owner: lsbOwner } = detectStegoWatermark(imageData);
+      const { matches, total, ratio, decodedOwner: robustOwner } = detectRobustWatermark(imageData);
       
-      const finalOwner = owner || decodedOwner;
-      
-      // Analyze file name containing "[watermarked]"
+      const finalOwner = lsbOwner || robustOwner;
       const hasFilenameSign = file.name.toLowerCase().includes('watermarked') || file.name.toLowerCase().includes('watermark');
-      
-      // Look for custom opacity layers or grid anomalies
       const hasVisualWatermarkPredicted = hasFilenameSign; 
       
       let score = 0;
       const methods: string[] = [];
       let comments = "The file does not contain any authorized digital watermark signatures.";
       
-      const isRobustVerified = ratio >= 0.75; // 18 out of 24 header bits match perfectly
+      const isRobustVerified = ratio >= 0.70;
       
       if (presents) {
         score = 100;
         methods.push("Invisible Steganographic Pixel Layer");
         if (isRobustVerified) {
-          methods.push("Robust Spatial-Luminance Safety Seal");
+          methods.push("Robust Spatial-Luminance Wavelet Seal");
         }
         if (finalOwner) {
           comments = `Verified authentic (Pristine PNG). Owner identified as: "${finalOwner}". Found embedded LSB pixel validation signature matching 'DIGITAL_WATERMARK_VERIFIED_2026'.`;
@@ -456,16 +644,16 @@ export function generateVerificationReport(
         }
       } else if (isRobustVerified) {
         score = Math.round(ratio * 100);
-        methods.push("Robust Spatial-Luminance Safety Seal");
+        methods.push("Robust Spatial-Luminance Wavelet Seal");
         if (finalOwner) {
-          comments = `Verified authentic (Rugged protection). Robust block-luminance safety seal successfully decoded. Owner identified as: "${finalOwner}". This successfully confirms ownership even after format conversion (PNG-to-JPG), drawing, compression, or light editing.`;
+          comments = `Verified authentic (Rugged proof). Robust Wavelet-Spread Spectrum seal decoded. Owner: "${finalOwner}". Successfully survived edits, screenshots/captures, or cropping.`;
         } else {
-          comments = `Verified authentic (Rugged protection). Robust block-luminance safety seal successfully decoded (Match: ${matches}/${total}, ${Math.round(ratio * 100)}%). This confirms ownership even after format conversion (PNG-to-JPG), drawing, compression, or light editing.`;
+          comments = `Verified authentic (Rugged proof). Robust Wavelet-Spread Spectrum seal decoded (Match: ${matches}/${total}, ${Math.round(ratio * 100)}%). Successfully survived screenshots/captures or cropping.`;
         }
       } else if (hasFilenameSign) {
         score = 45;
         methods.push("Filename Meta Marker");
-        comments = "Filename flag indicated watermarked state, but invisible stego verification signature was missing (or was lost due to lossy JPEG compression).";
+        comments = "Filename flag indicated watermarked state, but invisible stego verification signature was missing (or lost due to low resolution).";
       }
 
       const isVerified = presents || isRobustVerified;

@@ -2,6 +2,7 @@ import cv2
 import numpy as np
 import pywt
 import sys
+import os
 
 # =========================================================================
 # 🛡️ GLOBAL CONFIGURATION & CRYPTOGRAPHIC CONSTANTS
@@ -344,10 +345,14 @@ if __name__ == "__main__":
         print("\n=======================================================")
         print("💻 Digital Watermarker Robust Python Utility CLI Usage:")
         print("=======================================================")
-        print("[1] Embed Watermark Signature:")
+        print("[1] Embed Watermark to Single Image:")
         print("    python robust_watermark.py embed original.png watermarked.png '© 2026 Core Tech Inc.'")
-        print("\n[2] Detect Invisible Signature (Screenshots/Cropped, etc.):")
+        print("\n[2] Detect Watermark from Single Image:")
         print("    python robust_watermark.py detect watermarked.png")
+        print("\n[3] Batch-Embed Watermark to Directory:")
+        print("    python robust_watermark.py batch-embed ./input_folder ./output_folder '© 2026 Core Tech'")
+        print("\n[4] Batch-Detect Watermark in Directory:")
+        print("    python robust_watermark.py batch-detect ./target_folder")
         print("=======================================================\n")
         sys.exit(0)
 
@@ -392,5 +397,105 @@ if __name__ == "__main__":
         except Exception as e:
             print(f"❌ 디코딩 실패: {e}")
             sys.exit(1)
+            
+    elif action == "batch-embed":
+        if len(sys.argv) < 5:
+            print("오류: 인수가 누락되었습니다. (사용법: python robust_watermark.py batch-embed <원본_폴더_경로> <출출력_폴더_경로> <서명_텍스트>)")
+            sys.exit(1)
+        input_dir = sys.argv[2]
+        output_dir = sys.argv[3]
+        signature = sys.argv[4]
+        
+        if not os.path.exists(input_dir):
+            print(f"❌ 오류: 원본 폴더가 존재하지 않습니다: {input_dir}")
+            sys.exit(1)
+            
+        os.makedirs(output_dir, exist_ok=True)
+        
+        valid_extensions = ('.png', '.jpg', '.jpeg', '.bmp', '.tiff', '.webp')
+        files = [f for f in os.listdir(input_dir) if f.lower().endswith(valid_extensions)]
+        
+        if not files:
+            print(f"ℹ️ 알림: 해당 폴더에 처리 가능한 이미지 파일이 없습니다. (지원 확장자: {valid_extensions})")
+            sys.exit(0)
+            
+        print(f"\n⚡ 복수 이미지 일괄 내장(Batch-Embedding) 작업을 개시합니다... (총 {len(files)}개 파일)")
+        print(f" - 입력 경로: {input_dir}")
+        print(f" - 출력 경로: {output_dir}")
+        print(f" - 서명 문구: '{signature}'")
+        print("--------------------------------------------------------------------------------")
+        
+        success_count = 0
+        failure_count = 0
+        
+        for idx, filename in enumerate(files, 1):
+            input_path = os.path.join(input_dir, filename)
+            output_path = os.path.join(output_dir, filename)
+            
+            print(f"[{idx}/{len(files)}] {filename} 처리 중...", end="", flush=True)
+            try:
+                embed_robust_watermark(input_path, output_path, signature, watermark_intensity=24.0)
+                print(" -> ✅ 완료")
+                success_count += 1
+            except Exception as e:
+                print(f" -> ❌ 실패 ({str(e)})")
+                failure_count += 1
+                
+        print("--------------------------------------------------------------------------------")
+        print(f"🎉 일괄 처리 완료! (성공: {success_count}개, 실패: {failure_count}개)")
+        print(f"💾 결과물은 {output_dir} 폴더에 정교하게 저장되었습니다.\n")
+        
+    elif action == "batch-detect":
+        if len(sys.argv) < 3:
+            print("오류: 인수가 누락되었습니다. (사용법: python robust_watermark.py batch-detect <검증_대상_폴더_경로>)")
+            sys.exit(1)
+        target_dir = sys.argv[2]
+        
+        if not os.path.exists(target_dir):
+            print(f"❌ 오류: 대상 폴더가 존재하지 않습니다: {target_dir}")
+            sys.exit(1)
+            
+        valid_extensions = ('.png', '.jpg', '.jpeg', '.bmp', '.tiff', '.webp')
+        files = [f for f in os.listdir(target_dir) if f.lower().endswith(valid_extensions)]
+        
+        if not files:
+            print(f"ℹ️ 알림: 검증 가능한 이미지 파일이 없습니다. (지원 확장자: {valid_extensions})")
+            sys.exit(0)
+            
+        print(f"\n🔍 폴더 내 모든 파일 일괄 스캔(Batch-Detection)을 개시합니다... (총 {len(files)}개 파일)")
+        print(f" - 대상 폴더: {target_dir}")
+        print("--------------------------------------------------------------------------------")
+        
+        verified_count = 0
+        unverified_count = 0
+        
+        print(f"{'파일명 (Filename)':<30} | {'결과 (Status)':<12} | {'매칭율 (Score)':<12} | {'식별된 소유자 (Owner)'}")
+        print("-" * 85)
+        
+        for filename in files:
+            full_path = os.path.join(target_dir, filename)
+            try:
+                report = detect_robust_watermark(full_path)
+                status_str = "✅ VERIFIED" if report['verified'] else "❌ FAILED"
+                score_str = f"{report['score']}%"
+                owner_str = report['owner'] if report['owner'] else "-"
+                
+                # Truncate filename if too long for layout
+                display_name = filename[:27] + "..." if len(filename) > 30 else filename
+                print(f"{display_name:<30} | {status_str:<12} | {score_str:<12} | {owner_str}")
+                
+                if report['verified']:
+                    verified_count += 1
+                else:
+                    unverified_count += 1
+            except Exception as e:
+                display_name = filename[:27] + "..." if len(filename) > 30 else filename
+                print(f"{display_name:<30} | ❌ ERROR       | {'-':<12} | 에러: {str(e)[:30]}")
+                unverified_count += 1
+                
+        print("-" * 85)
+        print(f"📊 스캔 총평: 검증 이미지 {verified_count}개 | 미매칭/원본 {unverified_count}개 (총 {len(files)}개 중)")
+        print("================================================================================\n")
+        
     else:
         print(f"알 수 없는 액션 식별자: {action}. 사용법을 참고하시기 바랍니다.")

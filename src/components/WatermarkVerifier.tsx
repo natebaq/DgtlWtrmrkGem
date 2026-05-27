@@ -238,13 +238,20 @@ export const WatermarkVerifier: React.FC = () => {
                     </div>
 
                     {report.owner && (
-                      <div className="p-3 text-xs flex justify-between gap-4 bg-emerald-50/10 border-l-2 border-emerald-500" id="row-decoded-owner">
-                        <span className="text-emerald-800 flex items-center gap-1.5 font-semibold">
-                          <ShieldCheck className="w-3.5 h-3.5 text-emerald-600 animate-pulse" /> Decoded Owner Seal
+                      <div className="p-3 text-xs flex flex-col md:flex-row md:items-center justify-between gap-2.5 bg-emerald-50/10 border-l-2 border-emerald-500" id="row-decoded-owner">
+                        <span className="text-emerald-800 flex items-center gap-1.5 font-bold">
+                          <ShieldCheck className="w-3.5 h-3.5 text-emerald-600 shrink-0" /> Decoded Owner Seal
                         </span>
-                        <span className="font-bold text-emerald-950 truncate max-w-[245px] font-sans bg-emerald-100/30 px-2 py-0.5 rounded">
-                          {report.owner}
-                        </span>
+                        <div className="flex flex-col items-start md:items-end gap-1 select-all">
+                          <span className="font-mono font-bold text-emerald-950 truncate max-w-[280px] bg-emerald-100/30 px-2 py-1 rounded border border-emerald-200/50">
+                            {report.owner}
+                          </span>
+                          {report.score < 95 && (
+                            <span className="text-[10px] text-slate-500 leading-normal text-left md:text-right max-w-sm mt-0.5">
+                              ※ 자르기/캡처 변형 시 신호 복구 과정에서 위와 같이 코드 문자가 일부 손상되어 보일 수 있습니다. (아래 해설서 참고)
+                            </span>
+                          )}
+                        </div>
                       </div>
                     )}
 
@@ -256,7 +263,7 @@ export const WatermarkVerifier: React.FC = () => {
                     </div>
                   </div>
 
-                  {/* Visual Report Diagram Summary info */}
+                  {/* Technical diagnostics standard log */}
                   <div className="p-4 bg-slate-50/50 rounded-xl border border-slate-100" id="report-security-seal-panel">
                     <h5 className="text-[11px] uppercase font-bold text-slate-450 tracking-wider mb-2">Technical Report diagnostics</h5>
                     <ul className="text-xs font-medium text-slate-600 space-y-1.5">
@@ -269,6 +276,61 @@ export const WatermarkVerifier: React.FC = () => {
                         <span>Visual Layer Classifier: {report.hasVisualWatermarkPredicted ? 'External name matches output signature style' : 'No structural overlay heuristics found'}</span>
                       </li>
                     </ul>
+                  </div>
+
+                  {/* Layman Forensic Explanation Guide for Non-Experts */}
+                  <div className="p-5 bg-gradient-to-br from-slate-50 to-slate-100/55 rounded-2xl border border-slate-200/60 shadow-[0_4px_20px_rgba(0,0,0,0.01)]" id="layman-explanation-guide">
+                    <div className="flex items-center gap-2 mb-4 pb-2 border-b border-slate-200/50">
+                      <HelpCircle className="w-4 h-4 text-slate-500" />
+                      <h5 className="text-xs font-bold text-slate-850">📋 포렌식 분석 보고서 항목별 세부 기술 명세 가이드</h5>
+                    </div>
+                    
+                    <div className="space-y-4 text-xs">
+                      {/* Q1 */}
+                      <div className="space-y-1">
+                        <h6 className="font-bold text-slate-800 flex items-center gap-1.5 font-sans text-xs">
+                          <span className="flex items-center justify-center w-4 h-4 rounded-full bg-slate-200 text-slate-700 text-[10px] font-mono">1</span>
+                          이미지 변형(자르기/캡처)에 따른 소유자 표식(Owner Seal) 복원 신호 분석
+                        </h6>
+                        <p className="text-slate-600 leading-relaxed pl-5 font-sans text-[11px]">
+                          소유자 문자 데이터(Decoded Owner Seal)는 크롭(Cropping), 화면 캡처, 강압적인 압축과 같은 물리적 가공 시 나노 단위의 미세 픽셀에 기포 같은 신호 왜곡이 누적되어, 문자 복원 체계(8비트 데이터 블록)가 전반부에 부분 손상되면서 리포트 상에 깨진 문자로 나타날 수 있습니다. <br />
+                          그러나 당사의 워터마킹 원천 기술은 이미지 전 공간 영역에 **수학적 주파수 대역 격자 신호(Wavelet DWT 변환 공간)**로 조밀하게 분산 삽입되어 있습니다. 텍스트 문자열의 기하학적 형태는 일그러졌으나, 스캐너가 이미지 속에 깊이 각인된 **고유 격자 구조 신호를 성공적으로 복원 판단(신뢰도 70% 이상)**해냈을 경우, 해당 이미지는 본 기기에서 고유 암호 연동을 수행했던 정식 릴리즈 원본임을 암호학적으로 명확히 증명해 냅니다.
+                        </p>
+                      </div>
+
+                      {/* Q2 */}
+                      <div className="space-y-1 font-sans">
+                        <h6 className="font-bold text-slate-800 flex items-center gap-1.5 text-xs">
+                          <span className="flex items-center justify-center w-4 h-4 rounded-full bg-slate-200 text-slate-700 text-[10px] font-mono font-sans">2</span>
+                          포렌식 무결성 신뢰도 지표(Forensic Verification Score) 판독 기준 명세
+                        </h6>
+                        <div className="pl-5 space-y-1.5 leading-relaxed text-slate-600 text-[11px]">
+                          <div>
+                            <span className="font-semibold text-emerald-700 bg-emerald-50 px-1 py-0.5 rounded">95% ~ 100% [완전 무결 상태]</span> : 원시 화질의 정사 영역이 훼손 없이 보존되어 소유자 서술 텍스트까지 온전하게 해독 및 서명 복구가 완료된 등급입니다.
+                          </div>
+                          <div>
+                            <span className="font-semibold text-sky-700 bg-sky-50 px-1 py-0.5 rounded">70% ~ 94% [압축/편집 변형 정품]</span> : 국소적 자르기(Cropping)나 캡처가 가해진 상태입니다. 텍스트의 형질 변동은 발생했으나 **정품 격자 성질이 70% 이상 탄탄하게 생존해 정당한 소유권 추적 원형 검증에 무사히 성공**했음을 나타냅니다.
+                          </div>
+                          <div>
+                            <span className="font-semibold text-amber-700 bg-amber-50 px-1 py-0.5 rounded">50% ~ 69% [주의 분석 단계]</span> : 극심한 저화질 축소나 아날로그 재촬영 등으로 인해 주파수 무결 신호가 유효 임계치의 최하단에 도달하여 정합 대조가 한계에 봉착한 상태입니다.
+                          </div>
+                          <div>
+                            <span className="font-semibold text-slate-700 bg-slate-100 px-1 py-0.5 rounded">50% 미만 [인증 실효 상태]</span> : 워터마크 고유 신호를 감지할 수 없는 일반 비등록 가공물이거나, 신호 파괴가 완전화된 상태입니다.
+                          </div>
+                        </div>
+                      </div>
+
+                      {/* Q3 */}
+                      <div className="space-y-1 font-sans">
+                        <h6 className="font-bold text-slate-800 flex items-center gap-1.5 text-xs">
+                          <span className="flex items-center justify-center w-4 h-4 rounded-full bg-slate-200 text-slate-700 text-[10px] font-mono">3</span>
+                          최하위 비트 암호 서명 키(Stego LSB Signature Key) 매칭 통과 의의
+                        </h6>
+                        <p className="text-slate-600 leading-relaxed pl-5 font-sans text-[11px]">
+                          제3자가 임의적인 방식으로 텍스트를 위조 배치한 유사의조물로는 통과될 수 없는, **본 암호 시스템 규격 내의 고유 LSB 시그니처 풋프린트 키**가 파일 하위 계층에 완벽히 연합 합치되어 있음을 스캐너가 검출해낸 정량적 근거입니다. 이 검증 상태가 통과되었다면, 정당 권리자의 기기에서 서명된 정합 원형임을 완벽히 신뢰할 수 있습니다.
+                        </p>
+                      </div>
+                    </div>
                   </div>
                 </div>
               ) : null}

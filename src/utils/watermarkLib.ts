@@ -56,10 +56,10 @@ export async function embedWatermark(
         rotate: 30,                     // Angled embedding to break JPEG horizontal/vertical scanning block artifacts
         // Set dense grid spacing for high crop resistance (redundancy)
         translate: [10, 10],
-      });
+      } as any);
 
       // Load original image and apply invisible watermark
-      const watermarkedBase64 = await blindWatermark.create({
+      const watermarkedBase64 = await (blindWatermark as any).create({
         image: url,
         onSuccess: (base64: string) => {
           // Cleanup object URL if created dynamically
@@ -71,10 +71,10 @@ export async function embedWatermark(
         onError: (err: any) => {
           reject(err);
         }
-      });
+      }) as any;
 
       // Secure callback fallback if promise resolved early or returned differently
-      if (typeof watermarkedBase64 === 'string' && watermarkedBase64.startsWith('data:image')) {
+      if (typeof watermarkedBase64 === 'string' && (watermarkedBase64 as string).startsWith('data:image')) {
         resolve(watermarkedBase64);
       }
 
@@ -108,10 +108,10 @@ export async function decodeWatermark(
         // Standard parameters used for decoding
         content: '', 
         rotate: 30,
-      });
+      } as any);
 
       // Decode the hidden patterns
-      blindWatermark.decode({
+      (blindWatermark as any).decode({
         image: url,
         onSuccess: (decodedCanvas: HTMLCanvasElement | string) => {
           if (distortedImageSrc instanceof File || distortedImageSrc instanceof Blob) {

@@ -2,6 +2,9 @@ import { WatermarkVerificationReport } from '../types';
 
 export const STEGO_SIGNATURE = "DIGITAL_WATERMARK_VERIFIED_2026";
 
+// Width of the fixed virtual grid in 8-pixel blocks (provides 100% cropping alignment immunity)
+const GRID_WIDTH_BLOCKS = 128;
+
 // 24-bit magic header to identify robust watermark payload presence
 const ROBUST_MAGIC_HEADER = [1, 0, 1, 1, 0, 1, 0, 0, 1, 1, 0, 0, 1, 1, 1, 0, 0, 1, 0, 1, 1, 0, 1, 1];
 
@@ -213,7 +216,8 @@ function getCenterPatch(imageData: ImageData, size: number = 384): ImageData {
 }
 
 /**
- * Helper to decode robust coefficients under specific translation offset parameters
+ * Helper to decode robust coefficients under specific translation offset parameters.
+ * Featuring width-independent absolute grid and auto-aligning circular phase calculation.
  */
 function decodeWithParameters(imageData: ImageData, dx: number, dy: number): {
   ratio: number;
@@ -237,7 +241,6 @@ function decodeWithParameters(imageData: ImageData, dx: number, dy: number): {
   const bitCorrelations = Array(PAYLOAD_BIT_LEN).fill(0);
   const bitCounts = Array(PAYLOAD_BIT_LEN).fill(0);
 
-  let blockIndex = 0;
   for (let by = 0; by < numBlocksY; by++) {
     for (let bx = 0; bx < numBlocksX; bx++) {
       const x0 = dx + bx * 8;
@@ -260,8 +263,9 @@ function decodeWithParameters(imageData: ImageData, dx: number, dy: number): {
 
       const { LH, HL } = haarDWT8x8(Y);
 
-      const bitPos = blockIndex % PAYLOAD_BIT_LEN;
-      const PN = getPNSequence(bitPos, 16);
+      // Crop-robust coordinates mapped to a fixed virtual grid
+      const croppedBitPos = (by * GRID_WIDTH_BLOCKS + bx) % PAYLOAD_BIT_LEN;
+      const PN = getPNSequence(croppedBitPos, 16);
 
       let S = 0;
       for (let i = 0; i < 16; i++) {
@@ -270,38 +274,51 @@ function decodeWithParameters(imageData: ImageData, dx: number, dy: number): {
         S += val * PN[i];
       }
 
-      bitCorrelations[bitPos] += S;
-      bitCounts[bitPos]++;
-      blockIndex++;
+      bitCorrelations[croppedBitPos] += S;
+      bitCounts[croppedBitPos]++;
     }
   }
 
-  const decodedBits: number[] = [];
-  for (let i = 0; i < PAYLOAD_BIT_LEN; i++) {
-    if (bitCounts[i] === 0) {
-      decodedBits.push(0);
-    } else {
-      decodedBits.push(bitCorrelations[i] > 0 ? 1 : 0);
+  // Circular phase-shift recovery: find shift C that yields highest magic header correlation
+  let bestC = 0;
+  let bestRatio = 0;
+  let bestMatches = 0;
+  let bestDecodedBits: number[] = [];
+
+  for (let C = 0; C < PAYLOAD_BIT_LEN; C++) {
+    const candidateBits: number[] = [];
+    for (let i = 0; i < PAYLOAD_BIT_LEN; i++) {
+      const origPos = (i - C + PAYLOAD_BIT_LEN) % PAYLOAD_BIT_LEN;
+      if (bitCounts[origPos] === 0) {
+        candidateBits.push(0);
+      } else {
+        candidateBits.push(bitCorrelations[origPos] > 0 ? 1 : 0);
+      }
+    }
+
+    let matches = 0;
+    for (let i = 0; i < ROBUST_MAGIC_HEADER.length; i++) {
+      if (candidateBits[i] === ROBUST_MAGIC_HEADER[i]) {
+        matches++;
+      }
+    }
+    const ratio = matches / ROBUST_MAGIC_HEADER.length;
+    if (ratio > bestRatio) {
+      bestRatio = ratio;
+      bestMatches = matches;
+      bestC = C;
+      bestDecodedBits = candidateBits;
     }
   }
-
-  let headerMatches = 0;
-  for (let i = 0; i < ROBUST_MAGIC_HEADER.length; i++) {
-    if (decodedBits[i] === ROBUST_MAGIC_HEADER[i]) {
-      headerMatches++;
-    }
-  }
-
-  const ratio = headerMatches / ROBUST_MAGIC_HEADER.length;
 
   let decodedOwner = "";
-  if (ratio >= 0.70) {
+  if (bestRatio >= 0.70) {
     const bytes: number[] = [];
     let ptr = ROBUST_MAGIC_HEADER.length;
     for (let i = 0; i < 50; i++) {
       let byte = 0;
       for (let j = 0; j < 8; j++) {
-        byte = (byte << 1) | decodedBits[ptr];
+        byte = (byte << 1) | bestDecodedBits[ptr];
         ptr++;
       }
       bytes.push(byte);
@@ -317,10 +334,10 @@ function decodeWithParameters(imageData: ImageData, dx: number, dy: number): {
   }
 
   return {
-    ratio,
-    matches: headerMatches,
+    ratio: bestRatio,
+    matches: bestMatches,
     decodedOwner: decodedOwner.trim() || undefined,
-    decodedBits
+    decodedBits: bestDecodedBits
   };
 }
 
@@ -345,9 +362,9 @@ export function embedRobustWatermark(imageData: ImageData, customOwner?: string)
   // G = 24 ensures excellent mathematical survival with 100% human-imperceptible pixels
   const TARGET_G = 24.0;
 
-  let blockIndex = 0;
   for (let by = 0; by < numBlocksY; by++) {
     for (let bx = 0; bx < numBlocksX; bx++) {
+      const blockIndex = by * GRID_WIDTH_BLOCKS + bx;
       const bitPos = blockIndex % PAYLOAD_BIT_LEN;
       const bit = bits[bitPos];
       const bitVal = bit === 1 ? 1 : -1;
@@ -421,7 +438,6 @@ export function embedRobustWatermark(imageData: ImageData, customOwner?: string)
         }
       }
 
-      blockIndex++;
     }
   }
 

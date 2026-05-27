@@ -5,6 +5,40 @@ import sys
 import os
 
 # =========================================================================
+# 🛠️ UNICODE & MULTI-BYTE FILE PATH UTILITIES (FOR KOREAN WINDOWS ENVIRONMENT)
+# =========================================================================
+
+def cv2_imread_unicode(file_path: str):
+    """
+    OpenCV imread wrapper that supports file paths containing non-ASCII characters (e.g. Korean).
+    Windows has a known issue where cv2.imread fails on paths (or user folders) with Korean letters.
+    """
+    try:
+        # np.fromfile can read files from paths with Unicode characters on Windows
+        img_array = np.fromfile(file_path, np.uint8)
+        img = cv2.imdecode(img_array, cv2.IMREAD_COLOR)
+        return img
+    except Exception:
+        # Fallback to standard imread if np.fromfile fails (e.g. invalid file format or access)
+        return cv2.imread(file_path)
+
+def cv2_imwrite_unicode(file_path: str, img: np.ndarray) -> bool:
+    """
+    OpenCV imwrite wrapper that supports file paths containing non-ASCII characters (e.g. Korean).
+    """
+    try:
+        ext = os.path.splitext(file_path)[1]
+        # Encode the image in memory first
+        result, nparr = cv2.imencode(ext, img)
+        if result:
+            nparr.tofile(file_path)
+            return True
+    except Exception:
+        pass
+    # Fallback
+    return cv2.imwrite(file_path, img)
+
+# =========================================================================
 # 🛡️ GLOBAL CONFIGURATION & CRYPTOGRAPHIC CONSTANTS
 # =========================================================================
 
@@ -31,10 +65,28 @@ def mulberry32_prng(seed: int):
     h = seed & 0xFFFFFFFF
     def next_val():
         nonlocal h
+        # h in JS is a signed 32-bit int, but bitwise operations on positive Python ints
+        # are identical if we keep masking with 0xFFFFFFFF.
         h = (h + 0x6D2B79F5) & 0xFFFFFFFF
-        t = Math_imul(h ^ (h >> 15), 1 | h)
-        t = (t + Math_imul(t ^ (t >> 7), 61 | t)) ^ t
-        return (((t ^ (t >> 14)) & 0xFFFFFFFF) >> 0) / 4294967296.0
+        
+        # h ^ (h >>> 15)
+        h_xor = h ^ (h >> 15)  # Since h is locked as 0 to 0xFFFFFFFF, >> is identical to >>>
+        h_or = 1 | h
+        
+        t = Math_imul(h_xor, h_or)
+        
+        # (t ^ (t >>> 7)) -> t in Python can be positive or negative.
+        # To emulate JS 't >>> 7', we must treat 't' as a 32-bit unsigned integer first.
+        t_u = t & 0xFFFFFFFF
+        t_xor_shift = t ^ (t_u >> 7)
+        t_or = 61 | t
+        
+        t = (t + Math_imul(t_xor_shift, t_or)) ^ t
+        
+        # ((t ^ (t >>> 14)) >>> 0)
+        t_u2 = t & 0xFFFFFFFF
+        final_val = (t ^ (t_u2 >> 14)) & 0xFFFFFFFF
+        return final_val / 4294967296.0
     return next_val
 
 
@@ -42,9 +94,11 @@ def Math_imul(a: int, b: int) -> int:
     """Emulates 32-bit signed integer multiplication (equivalent to JavaScript Math.imul)"""
     a = a & 0xFFFFFFFF
     b = b & 0xFFFFFFFF
-    # Calculate product in 64-bit and then truncate to 32-bit signed
-    product = a * b
-    return np.int32(product & 0xFFFFFFFF)
+    product = (a * b) & 0xFFFFFFFF
+    # Convert unsigned 32-bit integers to 32-bit signed integers
+    if product >= 0x80000000:
+        return product - 0x100000000
+    return product
 
 
 def get_pn_sequence(bit_index: int, length: int) -> np.ndarray:
@@ -122,7 +176,7 @@ def embed_robust_watermark(image_path: str, output_path: str, custom_owner: str,
     Embeds an invisible Wavelet-domain Spread Spectrum (DWT-SS) watermark into image's Luminance (Y channel).
     Extremely resistant against screenshots, cropping, resizing, and JPEG compression.
     """
-    img = cv2.imread(image_path)
+    img = cv2_imread_unicode(image_path)
     if img is None:
         raise FileNotFoundError(f"원본 이미지를 고해상도 리포지토리에서 찾을 수 없습니다: {image_path}")
 
@@ -181,7 +235,7 @@ def embed_robust_watermark(image_path: str, output_path: str, custom_owner: str,
     # Merge modified luminance channel back and output the high-fidelity protected image
     ycrcb[:, :, 0] = np.clip(Y, 0, 255).astype(np.uint8)
     watermarked_bgr = cv2.cvtColor(ycrcb, cv2.COLOR_YCrCb2BGR)
-    cv2.imwrite(output_path, watermarked_bgr)
+    cv2_imwrite_unicode(output_path, watermarked_bgr)
     return True
 
 
@@ -245,7 +299,7 @@ def detect_robust_watermark(captured_image_path: str) -> dict:
     Decodes robust digital watermarks from blurred, resized, captured (screenshot),
     or cropped images by sweeping physical offsets, scaling ratios, and channel values.
     """
-    img = cv2.imread(captured_image_path)
+    img = cv2_imread_unicode(captured_image_path)
     if img is None:
         raise FileNotFoundError(f"스캔할 대상을 식별할 수 없습니다: {captured_image_path}")
 
